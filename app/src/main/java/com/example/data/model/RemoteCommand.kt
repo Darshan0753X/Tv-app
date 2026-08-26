@@ -1,0 +1,52 @@
+package com.example.data.model
+
+enum class CommandType {
+    DPAD_UP,
+    DPAD_DOWN,
+    DPAD_LEFT,
+    DPAD_RIGHT,
+    DPAD_CENTER,
+    BACK,
+    HOME,
+    MENU,
+    POWER,
+    VOLUME_UP,
+    VOLUME_DOWN,
+    MUTE,
+    PLAY_PAUSE,
+    PLAY,
+    PAUSE,
+    STOP,
+    REWIND,
+    FAST_FORWARD,
+    PREVIOUS,
+    NEXT,
+    CHANNEL_UP,
+    CHANNEL_DOWN,
+    NUM_0, NUM_1, NUM_2, NUM_3, NUM_4, NUM_5, NUM_6, NUM_7, NUM_8, NUM_9,
+    APP_LAUNCH,
+    TEXT_INPUT,
+    MOUSE_MOVE,
+    MOUSE_CLICK,
+    MOUSE_SCROLL,
+    SET_VOLUME,
+    SEEK_TO,
+    BROWSER_OPEN,
+    PDF_OPEN,
+    PDF_PAGE_CHANGE,
+    SCREEN_MIRROR_START,
+    SCREEN_MIRROR_STOP,
+    SCREEN_MIRROR_SOURCE_CHANGE,
+    SCREEN_MIRROR_ORIENTATION_TOGGLE,
+    SCREEN_MIRROR_AUDIO_TOGGLE,
+    SCREEN_MIRROR_DRAW
+}
+
+data class RemoteCommand(
+    val commandType: CommandType,
+    val textValue: String = "",
+    val intValue: Int = 0,
+    val floatX: Float = 0f,
+    val floatY: Float = 0f,
+    val timestamp: Long = System.currentTimeMillis()
+)

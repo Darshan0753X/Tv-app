@@ -1,0 +1,6 @@
+{
+  "name": "TV Cast & Remote Hub",
+  "description": "All-in-one Android TV & Set-Top Box companion app for Wi-Fi remote control, media casting, high-speed file sharing, browser, and PDF presenter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
