@@ -136,6 +136,23 @@ class ScreenCastService : Service() {
 
         when (action) {
             ACTION_START -> {
+                // Immediately establish foreground status to satisfy Android O+ requirements
+                val initialNotification = createNotification("Starting screen cast...", "Initializing")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            initialNotification,
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in startForeground with media projection type: ${e.message}")
+                        startForeground(NOTIFICATION_ID, initialNotification)
+                    }
+                } else {
+                    startForeground(NOTIFICATION_ID, initialNotification)
+                }
+
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
                 val resultData = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
                 val qualityName = intent.getStringExtra(EXTRA_QUALITY_NAME) ?: MirrorQuality.ULTRA_HD.name
@@ -147,6 +164,8 @@ class ScreenCastService : Service() {
                 if (resultCode != -1 && resultData != null) {
                     startScreenCapture(resultCode, resultData, quality, orientation)
                 } else {
+                    Log.w(TAG, "Missing resultCode or resultData for screen capture")
+                    stopScreenCapture()
                     stopSelf()
                 }
             }

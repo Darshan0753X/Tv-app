@@ -20,9 +20,9 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import org.json.JSONObject
-import java.io.File
 import java.io.InputStream
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class TvRemoteClient(private val context: Context) {
@@ -38,6 +38,59 @@ class TvRemoteClient(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    // Cache session tokens per device ID
+    private val sessionTokens = ConcurrentHashMap<String, String>()
+
+    fun setSessionToken(deviceId: String, token: String) {
+        sessionTokens[deviceId] = token
+    }
+
+    fun getSessionToken(deviceId: String): String? = sessionTokens[deviceId]
+
+    private fun Request.Builder.withAuth(device: TvDevice): Request.Builder {
+        val token = sessionTokens[device.id]
+        if (!token.isNullOrBlank()) {
+            header("Authorization", "Bearer $token")
+        }
+        if (device.pin.isNotBlank()) {
+            header("x-auth-pin", device.pin)
+        }
+        return this
+    }
+
+    /**
+     * Authenticate and pair with TV using PIN
+     */
+    suspend fun pairWithPin(device: TvDevice, pin: String): Pair<Boolean, String?> = withContext(Dispatchers.IO) {
+        try {
+            val json = JSONObject().apply {
+                put("pin", pin)
+                put("clientName", "Phone Remote")
+            }
+            val request = Request.Builder()
+                .url("http://${device.ipAddress}:${device.port}/api/pair")
+                .post(json.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val resJson = JSONObject(body)
+                    val token = resJson.optString("token", "")
+                    if (token.isNotBlank()) {
+                        sessionTokens[device.id] = token
+                        return@withContext Pair(true, token)
+                    }
+                    return@withContext Pair(true, null)
+                }
+                Pair(false, null)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Pairing error with ${device.ipAddress}: ${e.message}")
+            Pair(false, null)
+        }
+    }
 
     /**
      * Send remote button command (DPAD, Volume, Power, Media, Text)
@@ -55,11 +108,13 @@ class TvRemoteClient(private val context: Context) {
 
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/remote/command")
+                .withAuth(device)
                 .post(json.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             Log.d(TAG, "Command failed to ${device.ipAddress}: ${e.message}")
             false
@@ -83,11 +138,13 @@ class TvRemoteClient(private val context: Context) {
 
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/cast")
+                .withAuth(device)
                 .post(json.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Cast media failed to ${device.ipAddress}: ${e.message}")
             false
@@ -140,14 +197,16 @@ class TvRemoteClient(private val context: Context) {
 
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/files/upload")
+                .withAuth(device)
                 .header("x-file-name", encodedName)
                 .header("x-file-size", fileSize.toString())
                 .header("x-file-category", category.name)
                 .post(countingRequestBody)
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             Log.e(TAG, "File upload failed to ${device.ipAddress}: ${e.message}")
             false
@@ -161,25 +220,27 @@ class TvRemoteClient(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/playback")
+                .withAuth(device)
                 .get()
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: return@withContext null
-                val json = JSONObject(body)
-                return@withContext PlaybackState(
-                    isPlaying = json.optBoolean("isPlaying", false),
-                    currentPositionMs = json.optLong("positionMs", 0L),
-                    durationMs = json.optLong("durationMs", 0L),
-                    title = json.optString("title", ""),
-                    subtitle = json.optString("subtitle", ""),
-                    volume = json.optInt("volume", 75),
-                    isMuted = json.optBoolean("isMuted", false),
-                    streamUrl = json.optString("streamUrl", "")
-                )
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: return@withContext null
+                    val json = JSONObject(body)
+                    return@withContext PlaybackState(
+                        isPlaying = json.optBoolean("isPlaying", false),
+                        currentPositionMs = json.optLong("positionMs", 0L),
+                        durationMs = json.optLong("durationMs", 0L),
+                        title = json.optString("title", ""),
+                        subtitle = json.optString("subtitle", ""),
+                        volume = json.optInt("volume", 75),
+                        isMuted = json.optBoolean("isMuted", false),
+                        streamUrl = json.optString("streamUrl", "")
+                    )
+                }
+                null
             }
-            null
         } catch (e: Exception) {
             null
         }
@@ -192,11 +253,13 @@ class TvRemoteClient(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/screen/frame")
+                .withAuth(device)
                 .post(frameBytes.toRequestBody("image/jpeg".toMediaType()))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }
@@ -212,11 +275,13 @@ class TvRemoteClient(private val context: Context) {
             }
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/screen/start")
+                .withAuth(device)
                 .post(json.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }
@@ -229,11 +294,13 @@ class TvRemoteClient(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url("http://${device.ipAddress}:${device.port}/api/screen/stop")
+                .withAuth(device)
                 .post("{}".toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }
@@ -249,8 +316,9 @@ class TvRemoteClient(private val context: Context) {
                 .get()
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            response.isSuccessful
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }

@@ -7,17 +7,25 @@ import com.example.network.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
 
 class TvDiscoveryService(private val context: Context) {
 
@@ -59,13 +67,12 @@ class TvDiscoveryService(private val context: Context) {
                     val senderIp = packet.address.hostAddress ?: continue
 
                     if (message.startsWith(DISCOVERY_BEACON_PREFIX)) {
-                        // Format: TV_HUB_BEACON|Name|Port|Model|Pin
+                        // Format: TV_HUB_BEACON|Name|Port|Model|AUTH_REQUIRED
                         val parts = message.split("|")
                         if (parts.size >= 4) {
                             val name = parts[1]
                             val port = parts[2].toIntOrNull() ?: HTTP_PORT
                             val model = parts[3]
-                            val pin = if (parts.size > 4) parts[4] else "1234"
 
                             val device = TvDevice(
                                 id = "tv_${senderIp.replace(".", "_")}",
@@ -73,7 +80,7 @@ class TvDiscoveryService(private val context: Context) {
                                 ipAddress = senderIp,
                                 port = port,
                                 model = model,
-                                pin = pin,
+                                pin = "",
                                 signalStrength = 95,
                                 lastSeenTimestamp = System.currentTimeMillis()
                             )
@@ -88,7 +95,7 @@ class TvDiscoveryService(private val context: Context) {
     }
 
     /**
-     * Broadcast a discovery query to the subnet and scan local IPs
+     * Broadcast a discovery query to the subnet and scan local IPs with bounded concurrency
      */
     fun startDiscoveryScan(scope: CoroutineScope) {
         scanJob?.cancel()
@@ -101,26 +108,29 @@ class TvDiscoveryService(private val context: Context) {
 
                 // 2. Scan local subnet IP range for HTTP server response on port 8080
                 val localIp = NetworkUtils.getLocalIpAddress(context)
+                if (localIp.isBlank() || localIp == "127.0.0.1") {
+                    return@launch
+                }
                 val subnetPrefix = localIp.substringBeforeLast(".") + "."
 
-                // Scan common range around current device (e.g. +-20 or 1..254)
                 val currentLastOctet = localIp.substringAfterLast(".").toIntOrNull() ?: 100
                 val ipsToScan = mutableListOf<String>()
 
-                // Prioritize immediate neighbors
                 for (i in 1..254) {
                     if (i != currentLastOctet) {
                         ipsToScan.add("$subnetPrefix$i")
                     }
                 }
 
-                // Chunked parallel probe
-                ipsToScan.chunked(25).forEach { chunk ->
-                    if (!isActive) return@launch
-                    chunk.forEach { ip ->
-                        launch(Dispatchers.IO) {
-                            probeDeviceAtIp(ip)
-                        }
+                // Chunked parallel probe with awaitAll to maintain bounded concurrency
+                coroutineScope {
+                    ipsToScan.chunked(25).forEach { chunk ->
+                        if (!isActive) return@coroutineScope
+                        chunk.map { ip ->
+                            async(Dispatchers.IO) {
+                                probeDeviceAtIp(ip)
+                            }
+                        }.awaitAll()
                     }
                 }
             } catch (e: Exception) {
@@ -147,26 +157,41 @@ class TvDiscoveryService(private val context: Context) {
         }
     }
 
+    /**
+     * Probes an IP and validates with GET /api/info to confirm it is genuinely a TV Hub receiver
+     */
     private fun probeDeviceAtIp(ip: String) {
+        var connection: HttpURLConnection? = null
         try {
-            val socket = Socket()
-            socket.connect(InetSocketAddress(ip, HTTP_PORT), 400) // 400ms timeout
-            socket.close()
+            val url = URL("http://$ip:$HTTP_PORT/api/info")
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 500
+                readTimeout = 750
+                requestMethod = "GET"
+            }
 
-            // Device is reachable on port 8080!
-            val device = TvDevice(
-                id = "tv_${ip.replace(".", "_")}",
-                name = "Android TV ($ip)",
-                ipAddress = ip,
-                port = HTTP_PORT,
-                model = "Android TV / Set-Top Box",
-                pin = "1234",
-                signalStrength = 90,
-                lastSeenTimestamp = System.currentTimeMillis()
-            )
-            addOrUpdateDevice(device)
+            if (connection.responseCode == 200) {
+                val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+                val json = JSONObject(responseText)
+                val name = json.optString("name", "Android TV Box")
+                val model = json.optString("model", "Set-Top Box")
+
+                val device = TvDevice(
+                    id = "tv_${ip.replace(".", "_")}",
+                    name = name,
+                    ipAddress = ip,
+                    port = HTTP_PORT,
+                    model = model,
+                    pin = "",
+                    signalStrength = 90,
+                    lastSeenTimestamp = System.currentTimeMillis()
+                )
+                addOrUpdateDevice(device)
+            }
         } catch (e: Exception) {
-            // Not responding or port closed
+            // Not a TV Hub device or unreachable
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -191,7 +216,7 @@ class TvDiscoveryService(private val context: Context) {
             ipAddress = ip,
             port = port,
             model = "Set-Top Box (Manual)",
-            pin = "1234",
+            pin = "",
             isPaired = true,
             isConnected = true
         )

@@ -31,21 +31,21 @@ object NetworkUtils {
 
             // Fallback to NetworkInterface
             val interfaces = NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
+            while (interfaces != null && interfaces.hasMoreElements()) {
                 val networkInterface = interfaces.nextElement()
                 if (networkInterface.isLoopback || !networkInterface.isUp) continue
                 val addresses = networkInterface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
                     if (!address.isLoopbackAddress && address is Inet4Address) {
-                        return address.hostAddress ?: "192.168.1.100"
+                        return address.hostAddress ?: ""
                     }
                 }
             }
         } catch (e: Exception) {
             // ignore
         }
-        return "192.168.1.105"
+        return "127.0.0.1"
     }
 
     fun getWifiSsid(context: Context): String {
@@ -64,13 +64,13 @@ object NetworkUtils {
         } catch (e: Exception) {
             // ignore
         }
-        return "Home-WiFi-5G"
+        return "Wi-Fi Network"
     }
 
     fun isWifiConnected(context: Context): Boolean {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        val network = cm?.activeNetwork ?: return true
-        val capabilities = cm.getNetworkCapabilities(network) ?: return true
+        val network = cm?.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
         return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }

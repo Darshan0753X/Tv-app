@@ -87,6 +87,8 @@ fun DeviceDiscoveryScreen(
     var manualIpInput by remember { mutableStateOf(NetworkUtils.getLocalIpAddress(context)) }
     var manualNameInput by remember { mutableStateOf("My Set-Top Box") }
     var showManualDialog by remember { mutableStateOf(false) }
+    var pairingDevice by remember { mutableStateOf<TvDevice?>(null) }
+    var enteredPin by remember { mutableStateOf("1234") }
 
     val wifiSsid = remember { NetworkUtils.getWifiSsid(context) }
     val phoneIp = remember { NetworkUtils.getLocalIpAddress(context) }
@@ -337,7 +339,14 @@ fun DeviceDiscoveryScreen(
                         if (isConnected) TvAccentGreen else TvBorderDark,
                         RoundedCornerShape(18.dp)
                     )
-                    .clickable { viewModel.setConnectedDevice(device) }
+                    .clickable {
+                        if (isConnected) {
+                            viewModel.setConnectedDevice(null)
+                        } else {
+                            pairingDevice = device
+                            enteredPin = device.pin.ifBlank { "1234" }
+                        }
+                    }
                     .testTag("device_item_${device.id}"),
                 color = TvSurfaceDark
             ) {
@@ -389,7 +398,7 @@ fun DeviceDiscoveryScreen(
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = if (isConnected) "CONNECTED" else "CONNECT",
+                            text = if (isConnected) "CONNECTED" else "PAIR & CONNECT",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (isConnected) Color(0xFF0F172A) else Color.White
@@ -398,5 +407,59 @@ fun DeviceDiscoveryScreen(
                 }
             }
         }
+    }
+
+    // PIN Authentication Dialog
+    if (pairingDevice != null) {
+        val target = pairingDevice!!
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pairingDevice = null },
+            title = {
+                Text("Enter TV Pairing PIN", color = Color.White, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Enter the 4-digit PIN code displayed on ${target.name}:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = enteredPin,
+                        onValueChange = { if (it.length <= 8) enteredPin = it },
+                        label = { Text("4-Digit PIN (e.g. 1234)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("input_pairing_pin"),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = TvAccentCyan,
+                            unfocusedBorderColor = TvBorderDark,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.pairDeviceWithPin(target, enteredPin.trim())
+                        pairingDevice = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TvAccentCyan),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("btn_confirm_pair")
+                ) {
+                    Text("Pair & Connect", color = Color(0xFF0F172A), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { pairingDevice = null }) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = TvSurfaceDark,
+            shape = RoundedCornerShape(20.dp)
+        )
     }
 }

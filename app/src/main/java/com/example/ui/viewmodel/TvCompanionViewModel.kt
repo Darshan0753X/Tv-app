@@ -498,6 +498,20 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun pairDeviceWithPin(device: TvDevice, pin: String) {
+        viewModelScope.launch {
+            val (success, token) = remoteClient.pairWithPin(device, pin)
+            if (success) {
+                val pairedDevice = device.copy(pin = pin, isPaired = true, isConnected = true)
+                _connectedDevice.value = pairedDevice
+                repository.saveDevice(pairedDevice)
+                _userMessage.tryEmit("Paired successfully with ${device.name}!")
+            } else {
+                _userMessage.tryEmit("Pairing failed: Incorrect PIN for ${device.name}")
+            }
+        }
+    }
+
     fun toggleTouchpadMode() {
         _isTouchpadMode.value = !_isTouchpadMode.value
     }

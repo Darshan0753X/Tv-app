@@ -27,12 +27,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -41,6 +39,8 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class TvReceiverHttpServer(private val context: Context) {
 
@@ -48,6 +48,7 @@ class TvReceiverHttpServer(private val context: Context) {
         const val SERVER_PORT = 8080
         const val UDP_BEACON_PORT = 8889
         const val TAG = "TvReceiverServer"
+        const val MAX_UPLOAD_SIZE = 500L * 1024 * 1024 // 500 MB max file upload
     }
 
     private var serverSocket: ServerSocket? = null
@@ -62,6 +63,9 @@ class TvReceiverHttpServer(private val context: Context) {
 
     private val _pinCode = MutableStateFlow("1234")
     val pinCode: StateFlow<String> = _pinCode.asStateFlow()
+
+    // Valid authenticated session tokens
+    private val authenticatedTokens = ConcurrentHashMap.newKeySet<String>()
 
     // Shared events dispatched to TV UI
     private val _incomingCommand = MutableSharedFlow<RemoteCommand>(extraBufferCapacity = 64)
@@ -98,6 +102,7 @@ class TvReceiverHttpServer(private val context: Context) {
 
     fun setPinCode(pin: String) {
         _pinCode.value = pin
+        authenticatedTokens.clear()
     }
 
     fun updatePlaybackState(state: PlaybackState) {
@@ -137,12 +142,11 @@ class TvReceiverHttpServer(private val context: Context) {
             }
         }
 
-        // 2. Start UDP Beacon Broadcaster
+        // 2. Start UDP Beacon Broadcaster without leaking the PIN
         beaconJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
                 try {
-                    val localIp = NetworkUtils.getLocalIpAddress(context)
-                    val beaconMsg = "TV_HUB_BEACON|${_tvName.value}|$SERVER_PORT|Android TV Box|${_pinCode.value}"
+                    val beaconMsg = "TV_HUB_BEACON|${_tvName.value}|$SERVER_PORT|Android TV Box|AUTH_REQUIRED"
                     val socket = DatagramSocket()
                     socket.broadcast = true
                     val data = beaconMsg.toByteArray()
@@ -158,41 +162,92 @@ class TvReceiverHttpServer(private val context: Context) {
         }
     }
 
+    /**
+     * Parse HTTP headers cleanly from raw InputStream without BufferedReader buffering
+     */
+    private fun readHttpHeaders(input: InputStream): Pair<List<String>, Map<String, String>>? {
+        val headerBytes = ByteArrayOutputStream()
+        var matched = 0
+        val maxHeaderBytes = 16 * 1024 // 16KB limit
+        while (matched < 4 && headerBytes.size() < maxHeaderBytes) {
+            val b = input.read()
+            if (b == -1) return null
+            headerBytes.write(b)
+            if (matched == 0 && b == '\r'.code) matched = 1
+            else if (matched == 1 && b == '\n'.code) matched = 2
+            else if (matched == 2 && b == '\r'.code) matched = 3
+            else if (matched == 3 && b == '\n'.code) matched = 4
+            else if (b == '\r'.code) matched = 1
+            else matched = 0
+        }
+        if (matched != 4) return null
+
+        val headerText = headerBytes.toString(Charsets.US_ASCII.name())
+        val lines = headerText.split("\r\n").filter { it.isNotBlank() }
+        if (lines.isEmpty()) return null
+
+        val headers = mutableMapOf<String, String>()
+        for (i in 1 until lines.size) {
+            val line = lines[i]
+            val colonIdx = line.indexOf(':')
+            if (colonIdx > 0) {
+                val k = line.substring(0, colonIdx).trim().lowercase()
+                val v = line.substring(colonIdx + 1).trim()
+                headers[k] = v
+            }
+        }
+        return Pair(lines, headers)
+    }
+
+    private fun readExactBodyBytes(input: InputStream, length: Int): ByteArray {
+        if (length <= 0) return ByteArray(0)
+        val data = ByteArray(length)
+        var total = 0
+        while (total < length) {
+            val read = input.read(data, total, length - total)
+            if (read == -1) break
+            total += read
+        }
+        return if (total == length) data else data.copyOf(total)
+    }
+
+    private fun isRequestAuthorized(headers: Map<String, String>, clientIp: String): Boolean {
+        // Allow localhost loopback requests
+        val localIp = NetworkUtils.getLocalIpAddress(context)
+        if (clientIp == "127.0.0.1" || clientIp == "::1" || (localIp.isNotEmpty() && clientIp == localIp)) {
+            return true
+        }
+        val authHeader = headers["authorization"] ?: ""
+        if (authHeader.startsWith("Bearer ", ignoreCase = true)) {
+            val token = authHeader.substring(7).trim()
+            if (authenticatedTokens.contains(token)) return true
+        }
+        val pinHeader = headers["x-auth-pin"] ?: ""
+        if (pinHeader.isNotBlank() && pinHeader == _pinCode.value) {
+            return true
+        }
+        return false
+    }
+
     private fun handleClientConnection(socket: Socket) {
         try {
-            socket.soTimeout = 15000
+            socket.soTimeout = 20000
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
-            val reader = BufferedReader(InputStreamReader(input))
+            val clientIp = socket.inetAddress?.hostAddress ?: "127.0.0.1"
 
-            val requestLine = reader.readLine() ?: return
+            val parseResult = readHttpHeaders(input) ?: return
+            val requestLines = parseResult.first
+            val headers = parseResult.second
+
+            val requestLine = requestLines.first()
             val parts = requestLine.split(" ")
             if (parts.size < 2) return
 
-            val method = parts[0]
+            val method = parts[0].uppercase()
             val pathWithQuery = parts[1]
             val path = pathWithQuery.substringBefore("?")
-
-            // Read headers
-            val headers = mutableMapOf<String, String>()
-            var line: String?
-            var contentLength = 0
-            var contentType = ""
-
-            while (reader.readLine().also { line = it } != null) {
-                if (line.isNullOrEmpty()) break
-                val colonIdx = line!!.indexOf(":")
-                if (colonIdx > 0) {
-                    val key = line!!.substring(0, colonIdx).trim().lowercase()
-                    val value = line!!.substring(colonIdx + 1).trim()
-                    headers[key] = value
-                    if (key == "content-length") {
-                        contentLength = value.toIntOrNull() ?: 0
-                    } else if (key == "content-type") {
-                        contentType = value
-                    }
-                }
-            }
+            val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
 
             // Route handler
             when {
@@ -203,7 +258,7 @@ class TvReceiverHttpServer(private val context: Context) {
                         put("ip", localIp)
                         put("port", SERVER_PORT)
                         put("model", "Android TV / Set-Top Box")
-                        put("pin", _pinCode.value)
+                        put("authRequired", true)
                         put("status", "ONLINE")
                         put("volume", _currentPlaybackState.value.volume)
                         put("isPlaying", _currentPlaybackState.value.isPlaying)
@@ -212,8 +267,30 @@ class TvReceiverHttpServer(private val context: Context) {
                     sendJsonResponse(output, 200, json.toString())
                 }
 
+                (path == "/api/pair" || path == "/api/auth") && method == "POST" -> {
+                    val bodyBytes = readExactBodyBytes(input, contentLength)
+                    val body = String(bodyBytes, Charsets.UTF_8)
+                    val json = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
+                    val providedPin = json.optString("pin", headers["x-auth-pin"] ?: "")
+                    val clientName = json.optString("clientName", "Phone Remote Companion")
+
+                    if (providedPin == _pinCode.value) {
+                        val token = UUID.randomUUID().toString()
+                        authenticatedTokens.add(token)
+                        sendJsonResponse(output, 200, """{"status":"PAIRED","token":"$token","client":"$clientName"}""")
+                    } else {
+                        sendJsonResponse(output, 401, """{"status":"UNAUTHORIZED","error":"Invalid PIN"}""")
+                    }
+                }
+
                 path == "/api/remote/command" && method == "POST" -> {
-                    val body = readBody(reader, contentLength)
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        return
+                    }
+
+                    val bodyBytes = readExactBodyBytes(input, contentLength)
+                    val body = String(bodyBytes, Charsets.UTF_8)
                     val json = JSONObject(body)
                     val cmdStr = json.optString("command", "DPAD_CENTER")
                     val cmdType = try { CommandType.valueOf(cmdStr) } catch (e: Exception) { CommandType.DPAD_CENTER }
@@ -268,7 +345,13 @@ class TvReceiverHttpServer(private val context: Context) {
                 }
 
                 path == "/api/cast" && method == "POST" -> {
-                    val body = readBody(reader, contentLength)
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        return
+                    }
+
+                    val bodyBytes = readExactBodyBytes(input, contentLength)
+                    val body = String(bodyBytes, Charsets.UTF_8)
                     val json = JSONObject(body)
                     val title = json.optString("title", "Cast Media")
                     val subtitle = json.optString("subtitle", "")
@@ -300,19 +383,35 @@ class TvReceiverHttpServer(private val context: Context) {
                 }
 
                 path == "/api/files/upload" && method == "POST" -> {
-                    // Read file name from headers
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        return
+                    }
+
+                    if (contentLength > MAX_UPLOAD_SIZE) {
+                        sendJsonResponse(output, 413, """{"error":"Payload Too Large. Max file size is 500MB"}""")
+                        return
+                    }
+
+                    // Read sanitized file name from headers with path traversal protection
                     val rawFileName = headers["x-file-name"] ?: "received_file_${System.currentTimeMillis()}"
-                    val fileName = try { URLDecoder.decode(rawFileName, "UTF-8") } catch (e: Exception) { rawFileName }
+                    val decodedFileName = try { URLDecoder.decode(rawFileName, "UTF-8") } catch (e: Exception) { rawFileName }
+                    val safeFileName = File(decodedFileName).name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
                     val fileSize = headers["x-file-size"]?.toLongOrNull() ?: contentLength.toLong()
                     val categoryStr = headers["x-file-category"] ?: "OTHER"
                     val category = try { FileCategory.valueOf(categoryStr) } catch (e: Exception) { FileCategory.OTHER }
 
                     val filesDir = File(context.filesDir, "tv_shared_files").apply { mkdirs() }
-                    val targetFile = File(filesDir, fileName)
+                    val targetFile = File(filesDir, safeFileName).canonicalFile
 
-                    // Write file stream
+                    // Strict path traversal validation
+                    if (!targetFile.path.startsWith(filesDir.canonicalPath + File.separator) && targetFile.parentFile != filesDir) {
+                        sendJsonResponse(output, 403, """{"error":"Path traversal forbidden"}""")
+                        return
+                    }
+
                     val initialSharedFile = SharedFile(
-                        fileName = fileName,
+                        fileName = safeFileName,
                         fileSize = fileSize,
                         formattedSize = NetworkUtils.formatFileSize(fileSize),
                         category = category,
@@ -327,16 +426,12 @@ class TvReceiverHttpServer(private val context: Context) {
                     val buffer = ByteArray(64 * 1024)
                     var bytesReadTotal = 0L
                     FileOutputStream(targetFile).use { fos ->
-                        var bytesRead = input.read(buffer)
-                        // Read from raw socket input stream directly
-                        while (bytesReadTotal < contentLength && bytesRead != -1) {
-                            val toWrite = if (bytesReadTotal + bytesRead > contentLength) {
-                                (contentLength - bytesReadTotal).toInt()
-                            } else {
-                                bytesRead
-                            }
-                            fos.write(buffer, 0, toWrite)
-                            bytesReadTotal += toWrite
+                        while (bytesReadTotal < contentLength) {
+                            val maxToRead = ((contentLength - bytesReadTotal).coerceAtMost(buffer.size.toLong())).toInt()
+                            val bytesRead = input.read(buffer, 0, maxToRead)
+                            if (bytesRead == -1) break
+                            fos.write(buffer, 0, bytesRead)
+                            bytesReadTotal += bytesRead
                             val progress = if (contentLength > 0) (bytesReadTotal.toFloat() / contentLength) else 1f
                             _incomingFileTransfer.tryEmit(
                                 initialSharedFile.copy(
@@ -344,8 +439,6 @@ class TvReceiverHttpServer(private val context: Context) {
                                     status = if (bytesReadTotal >= contentLength) TransferStatus.COMPLETED else TransferStatus.TRANSFERRING
                                 )
                             )
-                            if (bytesReadTotal >= contentLength) break
-                            bytesRead = input.read(buffer)
                         }
                     }
 
@@ -357,30 +450,27 @@ class TvReceiverHttpServer(private val context: Context) {
                         )
                     )
 
-                    sendJsonResponse(output, 200, """{"status":"FILE_RECEIVED","name":"$fileName","size":$bytesReadTotal}""")
+                    sendJsonResponse(output, 200, """{"status":"FILE_RECEIVED","name":"$safeFileName","size":$bytesReadTotal}""")
                 }
 
                 path == "/api/screen/frame" && method == "POST" -> {
-                    val frameBytes = ByteArray(contentLength)
-                    var readTotal = 0
-                    while (readTotal < contentLength) {
-                        val r = input.read(frameBytes, readTotal, contentLength - readTotal)
-                        if (r == -1) break
-                        readTotal += r
-                    }
-                    if (readTotal == contentLength) {
-                        val bitmap = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
-                        if (bitmap != null) {
-                            _incomingScreenFrame.value = bitmap
-                            _screenMirrorActive.value = true
+                    if (contentLength > 0 && contentLength < 10 * 1024 * 1024) { // Max 10MB per frame
+                        val frameBytes = readExactBodyBytes(input, contentLength)
+                        if (frameBytes.size == contentLength) {
+                            val bitmap = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
+                            if (bitmap != null) {
+                                _incomingScreenFrame.value = bitmap
+                                _screenMirrorActive.value = true
+                            }
                         }
                     }
-                    sendJsonResponse(output, 200, """{"status":"FRAME_RECEIVED","size":$readTotal}""")
+                    sendJsonResponse(output, 200, """{"status":"FRAME_RECEIVED"}""")
                 }
 
                 path == "/api/screen/start" && method == "POST" -> {
-                    val body = readBody(reader, contentLength)
-                    val json = JSONObject(body)
+                    val bodyBytes = readExactBodyBytes(input, contentLength)
+                    val body = String(bodyBytes, Charsets.UTF_8)
+                    val json = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
                     val title = json.optString("title", "Live Device Screen")
                     _screenMirrorSourceTitle.value = title
                     _screenMirrorActive.value = true
@@ -424,22 +514,13 @@ class TvReceiverHttpServer(private val context: Context) {
         }
     }
 
-    private fun readBody(reader: BufferedReader, length: Int): String {
-        if (length <= 0) return "{}"
-        val buffer = CharArray(length)
-        var total = 0
-        while (total < length) {
-            val read = reader.read(buffer, total, length - total)
-            if (read == -1) break
-            total += read
-        }
-        return String(buffer, 0, total)
-    }
-
     private fun sendJsonResponse(output: OutputStream, statusCode: Int, json: String) {
         val statusText = when (statusCode) {
             200 -> "OK"
+            401 -> "Unauthorized"
+            403 -> "Forbidden"
             404 -> "Not Found"
+            413 -> "Payload Too Large"
             else -> "Internal Server Error"
         }
         val bytes = json.toByteArray(Charsets.UTF_8)
