@@ -39,6 +39,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -49,6 +50,7 @@ class TvReceiverHttpServer(private val context: Context) {
         const val UDP_BEACON_PORT = 8889
         const val TAG = "TvReceiverServer"
         const val MAX_UPLOAD_SIZE = 500L * 1024 * 1024 // 500 MB max file upload
+        const val SESSION_TOKEN_TTL_MS = 60 * 60 * 1000L // 1 hour short-lived session token
     }
 
     private var serverSocket: ServerSocket? = null
@@ -61,11 +63,12 @@ class TvReceiverHttpServer(private val context: Context) {
     private val _tvName = MutableStateFlow("Living Room TV Box")
     val tvName: StateFlow<String> = _tvName.asStateFlow()
 
-    private val _pinCode = MutableStateFlow("1234")
+    // Generate secure randomized 4-digit PIN on startup
+    private val _pinCode = MutableStateFlow(generateRandomPin())
     val pinCode: StateFlow<String> = _pinCode.asStateFlow()
 
-    // Valid authenticated session tokens
-    private val authenticatedTokens = ConcurrentHashMap.newKeySet<String>()
+    // Valid authenticated session tokens mapped to expiration timestamp (ms)
+    private val activeSessionTokens = ConcurrentHashMap<String, Long>()
 
     // Shared events dispatched to TV UI
     private val _incomingCommand = MutableSharedFlow<RemoteCommand>(extraBufferCapacity = 64)
@@ -102,7 +105,24 @@ class TvReceiverHttpServer(private val context: Context) {
 
     fun setPinCode(pin: String) {
         _pinCode.value = pin
-        authenticatedTokens.clear()
+        activeSessionTokens.clear()
+    }
+
+    /**
+     * Regenerate a new randomized 4-digit PIN and invalidate existing tokens
+     */
+    fun regeneratePin(): String {
+        val newPin = generateRandomPin()
+        _pinCode.value = newPin
+        activeSessionTokens.clear()
+        Log.i(TAG, "Regenerated new TV PIN: $newPin")
+        return newPin
+    }
+
+    private fun generateRandomPin(): String {
+        val secureRandom = SecureRandom()
+        val pinNumber = secureRandom.nextInt(9000) + 1000 // Random 4-digit between 1000 and 9999
+        return pinNumber.toString()
     }
 
     fun updatePlaybackState(state: PlaybackState) {
@@ -142,7 +162,7 @@ class TvReceiverHttpServer(private val context: Context) {
             }
         }
 
-        // 2. Start UDP Beacon Broadcaster without leaking the PIN
+        // 2. Start UDP Beacon Broadcaster without leaking the PIN (only broadcasting auth requirement)
         beaconJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
                 try {
@@ -217,15 +237,21 @@ class TvReceiverHttpServer(private val context: Context) {
         if (clientIp == "127.0.0.1" || clientIp == "::1" || (localIp.isNotEmpty() && clientIp == localIp)) {
             return true
         }
+
+        // Validate Bearer Session Token with TTL expiration
         val authHeader = headers["authorization"] ?: ""
         if (authHeader.startsWith("Bearer ", ignoreCase = true)) {
             val token = authHeader.substring(7).trim()
-            if (authenticatedTokens.contains(token)) return true
+            val expiry = activeSessionTokens[token]
+            if (expiry != null) {
+                if (System.currentTimeMillis() < expiry) {
+                    return true
+                } else {
+                    activeSessionTokens.remove(token) // Token expired
+                }
+            }
         }
-        val pinHeader = headers["x-auth-pin"] ?: ""
-        if (pinHeader.isNotBlank() && pinHeader == _pinCode.value) {
-            return true
-        }
+
         return false
     }
 
@@ -271,13 +297,22 @@ class TvReceiverHttpServer(private val context: Context) {
                     val bodyBytes = readExactBodyBytes(input, contentLength)
                     val body = String(bodyBytes, Charsets.UTF_8)
                     val json = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
-                    val providedPin = json.optString("pin", headers["x-auth-pin"] ?: "")
+                    val providedPin = json.optString("pin", "").trim()
                     val clientName = json.optString("clientName", "Phone Remote Companion")
 
-                    if (providedPin == _pinCode.value) {
+                    if (providedPin.isNotEmpty() && providedPin == _pinCode.value) {
                         val token = UUID.randomUUID().toString()
-                        authenticatedTokens.add(token)
-                        sendJsonResponse(output, 200, """{"status":"PAIRED","token":"$token","client":"$clientName"}""")
+                        val expiryTime = System.currentTimeMillis() + SESSION_TOKEN_TTL_MS
+                        activeSessionTokens[token] = expiryTime
+
+                        val responseJson = JSONObject().apply {
+                            put("status", "PAIRED")
+                            put("token", token)
+                            put("expiresIn", SESSION_TOKEN_TTL_MS / 1000)
+                            put("expiresAt", expiryTime)
+                            put("client", clientName)
+                        }
+                        sendJsonResponse(output, 200, responseJson.toString())
                     } else {
                         sendJsonResponse(output, 401, """{"status":"UNAUTHORIZED","error":"Invalid PIN"}""")
                     }
@@ -285,7 +320,7 @@ class TvReceiverHttpServer(private val context: Context) {
 
                 path == "/api/remote/command" && method == "POST" -> {
                     if (!isRequestAuthorized(headers, clientIp)) {
-                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
                         return
                     }
 
@@ -346,7 +381,7 @@ class TvReceiverHttpServer(private val context: Context) {
 
                 path == "/api/cast" && method == "POST" -> {
                     if (!isRequestAuthorized(headers, clientIp)) {
-                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
                         return
                     }
 
@@ -384,7 +419,7 @@ class TvReceiverHttpServer(private val context: Context) {
 
                 path == "/api/files/upload" && method == "POST" -> {
                     if (!isRequestAuthorized(headers, clientIp)) {
-                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer token or x-auth-pin"}""")
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
                         return
                     }
 
@@ -454,6 +489,11 @@ class TvReceiverHttpServer(private val context: Context) {
                 }
 
                 path == "/api/screen/frame" && method == "POST" -> {
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
+                        return
+                    }
+
                     if (contentLength > 0 && contentLength < 10 * 1024 * 1024) { // Max 10MB per frame
                         val frameBytes = readExactBodyBytes(input, contentLength)
                         if (frameBytes.size == contentLength) {
@@ -468,6 +508,11 @@ class TvReceiverHttpServer(private val context: Context) {
                 }
 
                 path == "/api/screen/start" && method == "POST" -> {
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
+                        return
+                    }
+
                     val bodyBytes = readExactBodyBytes(input, contentLength)
                     val body = String(bodyBytes, Charsets.UTF_8)
                     val json = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
@@ -478,6 +523,11 @@ class TvReceiverHttpServer(private val context: Context) {
                 }
 
                 path == "/api/screen/stop" && method == "POST" -> {
+                    if (!isRequestAuthorized(headers, clientIp)) {
+                        sendJsonResponse(output, 401, """{"error":"Unauthorized. Provide valid Bearer session token"}""")
+                        return
+                    }
+
                     _screenMirrorActive.value = false
                     _incomingScreenFrame.value = null
                     sendJsonResponse(output, 200, """{"status":"MIRROR_STOPPED"}""")

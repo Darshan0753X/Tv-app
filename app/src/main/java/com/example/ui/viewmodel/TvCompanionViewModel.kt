@@ -512,6 +512,12 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun regenerateTvPin(): String {
+        val newPin = tvServer.regeneratePin()
+        _userMessage.tryEmit("New TV Pairing PIN: $newPin")
+        return newPin
+    }
+
     fun toggleTouchpadMode() {
         _isTouchpadMode.value = !_isTouchpadMode.value
     }

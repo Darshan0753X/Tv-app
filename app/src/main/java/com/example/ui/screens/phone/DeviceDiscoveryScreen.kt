@@ -25,6 +25,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CastConnected
@@ -88,7 +90,7 @@ fun DeviceDiscoveryScreen(
     var manualNameInput by remember { mutableStateOf("My Set-Top Box") }
     var showManualDialog by remember { mutableStateOf(false) }
     var pairingDevice by remember { mutableStateOf<TvDevice?>(null) }
-    var enteredPin by remember { mutableStateOf("1234") }
+    var enteredPin by remember { mutableStateOf("") }
 
     val wifiSsid = remember { NetworkUtils.getWifiSsid(context) }
     val phoneIp = remember { NetworkUtils.getLocalIpAddress(context) }
@@ -344,7 +346,7 @@ fun DeviceDiscoveryScreen(
                             viewModel.setConnectedDevice(null)
                         } else {
                             pairingDevice = device
-                            enteredPin = device.pin.ifBlank { "1234" }
+                            enteredPin = device.pin.ifBlank { "" }
                         }
                     }
                     .testTag("device_item_${device.id}"),
@@ -429,6 +431,7 @@ fun DeviceDiscoveryScreen(
                         value = enteredPin,
                         onValueChange = { if (it.length <= 8) enteredPin = it },
                         label = { Text("4-Digit PIN (e.g. 1234)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("input_pairing_pin"),
                         colors = OutlinedTextFieldDefaults.colors(

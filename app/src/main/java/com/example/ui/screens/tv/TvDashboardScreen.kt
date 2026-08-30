@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Wifi
@@ -89,6 +90,7 @@ fun TvDashboardScreen(
     val mirrorState by viewModel.screenMirrorState.collectAsStateWithLifecycle()
     val activeTransfer by viewModel.activeFileTransfer.collectAsStateWithLifecycle()
     val isServerRunning by viewModel.httpServer.isRunning.collectAsStateWithLifecycle()
+    val pinCode by viewModel.httpServer.pinCode.collectAsStateWithLifecycle()
     val cursorPosition by viewModel.virtualCursorPosition.collectAsStateWithLifecycle()
     val isCursorVisible by viewModel.isCursorVisible.collectAsStateWithLifecycle()
 
@@ -173,27 +175,50 @@ fun TvDashboardScreen(
                             }
                         }
 
-                        // PIN Badge
-                        Box(
+                        // PIN Badge with Regenerate Support
+                        Surface(
+                            onClick = { viewModel.regenerateTvPin() },
                             modifier = Modifier
                                 .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0xFF1E2435))
-                                .border(1.dp, TvAccentCyan.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
-                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                                .border(1.dp, TvAccentCyan.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                                .testTag("tv_pairing_pin_badge"),
+                            color = Color(0xFF1E2435),
+                            shape = RoundedCornerShape(14.dp)
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = "PAIRING PIN",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TvAccentCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Regenerate PIN",
+                                        tint = TvAccentCyan.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
                                 Text(
-                                    text = "PAIRING PIN",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TvAccentCyan
-                                )
-                                Text(
-                                    text = "7824",
+                                    text = pinCode,
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Black,
                                     color = Color.White,
-                                    letterSpacing = 2.sp
+                                    letterSpacing = 3.sp
+                                )
+                                Text(
+                                    text = "Tap to refresh",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp,
+                                    color = Color(0xFF94A3B8)
                                 )
                             }
                         }
