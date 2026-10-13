@@ -2,6 +2,7 @@ package com.example.network.discovery
 
 import android.content.Context
 import android.util.Log
+import com.example.data.model.DiscoveryProtocol
 import com.example.data.model.TvDevice
 import com.example.network.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
@@ -17,17 +18,16 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.URL
 
 class TvDiscoveryService(private val context: Context) {
+
+    val nsdDiscovery = TvNsdDiscoveryService(context)
 
     private val _discoveredDevices = MutableStateFlow<List<TvDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<TvDevice>> = _discoveredDevices.asStateFlow()
@@ -38,6 +38,7 @@ class TvDiscoveryService(private val context: Context) {
     private var scanJob: Job? = null
     private var udpListenJob: Job? = null
     private var udpSocket: DatagramSocket? = null
+    private var nsdSyncJob: Job? = null
 
     companion object {
         const val UDP_PORT = 8889
@@ -48,9 +49,17 @@ class TvDiscoveryService(private val context: Context) {
     }
 
     /**
-     * Start listening for TV beacon broadcasts on UDP 8889
+     * Start listening for TV beacon broadcasts on UDP 8889 & sync NSD discoveries
      */
     fun startListeningForBeacons(scope: CoroutineScope) {
+        // Observe NSD discovered devices and sync into master list
+        nsdSyncJob?.cancel()
+        nsdSyncJob = scope.launch(Dispatchers.Main) {
+            nsdDiscovery.discoveredDevices.collect { nsdList ->
+                nsdList.forEach { addOrUpdateDevice(it) }
+            }
+        }
+
         udpListenJob?.cancel()
         udpListenJob = scope.launch(Dispatchers.IO) {
             try {
@@ -82,6 +91,7 @@ class TvDiscoveryService(private val context: Context) {
                                 model = model,
                                 pin = "",
                                 signalStrength = 95,
+                                discoveryProtocol = DiscoveryProtocol.UDP_BEACON,
                                 lastSeenTimestamp = System.currentTimeMillis()
                             )
                             addOrUpdateDevice(device)
@@ -95,18 +105,21 @@ class TvDiscoveryService(private val context: Context) {
     }
 
     /**
-     * Broadcast a discovery query to the subnet and scan local IPs with bounded concurrency
+     * Broadcast a discovery query to the subnet, start NsdManager mDNS discovery, and probe IPs
      */
     fun startDiscoveryScan(scope: CoroutineScope) {
         scanJob?.cancel()
         _isScanning.value = true
 
+        // 1. Start NsdManager discovery on local Wi-Fi
+        nsdDiscovery.startDiscovery(scope)
+
         scanJob = scope.launch(Dispatchers.IO) {
             try {
-                // 1. Send UDP broadcast ping
+                // 2. Send UDP broadcast ping
                 sendUdpBroadcastPing()
 
-                // 2. Scan local subnet IP range for HTTP server response on port 8080
+                // 3. Scan local subnet IP range for HTTP server response on port 8080
                 val localIp = NetworkUtils.getLocalIpAddress(context)
                 if (localIp.isBlank() || localIp == "127.0.0.1") {
                     return@launch
@@ -184,6 +197,7 @@ class TvDiscoveryService(private val context: Context) {
                     model = model,
                     pin = "",
                     signalStrength = 90,
+                    discoveryProtocol = DiscoveryProtocol.SUBNET_PROBE,
                     lastSeenTimestamp = System.currentTimeMillis()
                 )
                 addOrUpdateDevice(device)
@@ -197,7 +211,9 @@ class TvDiscoveryService(private val context: Context) {
 
     fun addOrUpdateDevice(device: TvDevice) {
         val current = _discoveredDevices.value.toMutableList()
-        val index = current.indexOfFirst { it.ipAddress == device.ipAddress }
+        val index = current.indexOfFirst {
+            it.ipAddress == device.ipAddress && (it.port == device.port || it.id == device.id)
+        }
         if (index >= 0) {
             current[index] = device.copy(
                 isPaired = current[index].isPaired,
@@ -218,7 +234,8 @@ class TvDiscoveryService(private val context: Context) {
             model = "Set-Top Box (Manual)",
             pin = "",
             isPaired = true,
-            isConnected = true
+            isConnected = true,
+            discoveryProtocol = DiscoveryProtocol.MANUAL
         )
         addOrUpdateDevice(device)
         return device
@@ -227,6 +244,8 @@ class TvDiscoveryService(private val context: Context) {
     fun stop() {
         scanJob?.cancel()
         udpListenJob?.cancel()
+        nsdSyncJob?.cancel()
+        nsdDiscovery.stopDiscovery()
         try {
             udpSocket?.close()
         } catch (e: Exception) {

@@ -1,26 +1,21 @@
 package com.example
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.core.content.ContextCompat
 import com.example.data.model.CommandType
 import com.example.data.model.RemoteCommand
 import com.example.ui.screens.MainControlScreen
@@ -41,35 +36,6 @@ class MainActivity : ComponentActivity() {
                 val snackbarHostState = remember { SnackbarHostState() }
                 val coroutineScope = rememberCoroutineScope()
 
-                // Wi-Fi & Nearby device permissions
-                val permissionsToRequest = remember {
-                    val list = mutableListOf(
-                        Manifest.permission.ACCESS_FINE_LOCATION,
-                        Manifest.permission.ACCESS_COARSE_LOCATION
-                    )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-                        list.add(Manifest.permission.READ_MEDIA_VIDEO)
-                        list.add(Manifest.permission.READ_MEDIA_AUDIO)
-                    }
-                    list.toTypedArray()
-                }
-
-                val permissionLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.RequestMultiplePermissions()
-                ) {
-                    // Permissions evaluated
-                }
-
-                LaunchedEffect(Unit) {
-                    val needsPermission = permissionsToRequest.any {
-                        ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
-                    }
-                    if (needsPermission) {
-                        permissionLauncher.launch(permissionsToRequest)
-                    }
-                }
-
                 LaunchedEffect(Unit) {
                     viewModel.userMessage.collect { msg ->
                         coroutineScope.launch {
@@ -81,11 +47,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Scaffold(
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
-                    modifier = Modifier.fillMaxSize()
-                ) { _ ->
+                Box(modifier = Modifier.fillMaxSize()) {
                     MainControlScreen(viewModel = viewModel)
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                    )
                 }
             }
         }

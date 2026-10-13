@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.network.NetworkUtils
 import com.example.ui.components.DeviceStatusBadge
+import com.example.ui.components.TransferProgressCard
 import com.example.ui.screens.phone.CastScreen
 import com.example.ui.screens.phone.DeviceDiscoveryScreen
 import com.example.ui.screens.phone.FileShareScreen
@@ -107,6 +108,7 @@ fun MainControlScreen(
     val context = LocalContext.current
     val isTvReceiverMode by viewModel.isTvReceiverMode.collectAsStateWithLifecycle()
     val connectedDevice by viewModel.connectedDevice.collectAsStateWithLifecycle()
+    val activeTransfer by viewModel.activeFileTransfer.collectAsStateWithLifecycle()
     val wifiSsid = remember { NetworkUtils.getWifiSsid(context) }
 
     var selectedPhoneTab by remember { mutableStateOf(PhoneNavTab.REMOTE) }
@@ -338,6 +340,20 @@ fun MainControlScreen(
                                 PhoneNavTab.DEVICES -> DeviceDiscoveryScreen(viewModel = viewModel)
                             }
                         }
+                    }
+                }
+            }
+
+            // Global file transfer progress (show over other tabs)
+            if (!isTvReceiverMode && selectedPhoneTab != PhoneNavTab.FILES) {
+                activeTransfer?.let { file ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp)
+                    ) {
+                        TransferProgressCard(file = file)
                     }
                 }
             }

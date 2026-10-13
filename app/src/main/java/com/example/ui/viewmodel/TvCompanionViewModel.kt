@@ -29,7 +29,10 @@ import com.example.data.model.TransferStatus
 import com.example.data.model.TvDevice
 import com.example.network.NetworkUtils
 import com.example.network.client.TvRemoteClient
+import com.example.network.discovery.NsdLogEntry
+import com.example.network.discovery.NsdServiceFilter
 import com.example.network.discovery.TvDiscoveryService
+import com.example.network.discovery.TvNsdDiscoveryService
 import com.example.network.server.TvReceiverHttpServer
 import com.example.service.ScreenCastEngine
 import com.example.service.ScreenCastManager
@@ -119,8 +122,7 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Active File Transfer Progress
-    private val _activeFileTransfer = MutableStateFlow<SharedFile?>(null)
-    val activeFileTransfer: StateFlow<SharedFile?> = _activeFileTransfer.asStateFlow()
+    val activeFileTransfer: StateFlow<SharedFile?> = com.example.service.FileUploadManager.activeFileTransfer
 
     // Remote UI States
     private val _isTouchpadMode = MutableStateFlow(false)
@@ -359,10 +361,12 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
 
         viewModelScope.launch {
             tvServer.incomingFileTransfer.collect { file ->
-                _activeFileTransfer.value = file
+                com.example.service.FileUploadManager.updateTransfer(file)
                 if (file.status == TransferStatus.COMPLETED) {
                     repository.saveSharedFile(file)
                     _userMessage.tryEmit("Received file on TV: ${file.fileName}")
+                    delay(1000)
+                    com.example.service.FileUploadManager.updateTransfer(null)
                 }
             }
         }
@@ -474,6 +478,9 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
         _isTvReceiverMode.value = (mode == AppMode.TV_RECEIVER)
         if (mode == AppMode.TV_RECEIVER) {
             tvServer.start(viewModelScope)
+            discoveryService.nsdDiscovery.registerTvReceiverService(tvServer.tvName.value)
+        } else {
+            discoveryService.nsdDiscovery.unregisterTvReceiverService()
         }
     }
 
@@ -676,68 +683,50 @@ class TvCompanionViewModel(application: Application) : AndroidViewModel(applicat
         category: FileCategory,
         customUri: Uri? = null
     ) {
-        val formattedSize = NetworkUtils.formatFileSize(fileSize)
-        val initialFile = SharedFile(
-            fileName = fileName,
-            fileSize = fileSize,
-            formattedSize = formattedSize,
-            category = category,
-            progress = 0f,
-            speedMbps = 65.0,
-            isIncoming = false,
-            status = TransferStatus.TRANSFERRING,
-            targetDeviceId = _connectedDevice.value?.id ?: "tv"
-        )
-        _activeFileTransfer.value = initialFile
-
-        viewModelScope.launch(Dispatchers.IO) {
-            val device = _connectedDevice.value
-
-            if (device != null && device.ipAddress.isNotBlank()) {
-                // Real socket stream transfer
-                val dummyBytes = ByteArray(1024 * 1024) // 1MB buffer
-                val inputStreamProvider: () -> InputStream = {
-                    if (customUri != null) {
-                        try {
-                            context.contentResolver.openInputStream(customUri) ?: ByteArrayInputStream(dummyBytes)
-                        } catch (e: Exception) {
-                            ByteArrayInputStream(dummyBytes)
-                        }
-                    } else {
-                        ByteArrayInputStream(dummyBytes)
-                    }
-                }
-
-                // Smooth simulated high-speed transfer loop for large files / responsive UX
-                val chunks = 20
-                for (i in 1..chunks) {
-                    delay(120)
-                    val progress = (i.toFloat() / chunks)
-                    val speed = 82.5 + (i % 5) * 3.2
-                    val updated = initialFile.copy(
-                        progress = progress,
-                        speedMbps = speed,
-                        status = if (i == chunks) TransferStatus.COMPLETED else TransferStatus.TRANSFERRING
-                    )
-                    _activeFileTransfer.value = updated
-                }
-
-                val completed = initialFile.copy(
-                    progress = 1f,
-                    speedMbps = 85.0,
-                    status = TransferStatus.COMPLETED
-                )
-                _activeFileTransfer.value = completed
-                repository.saveSharedFile(completed)
-                _userMessage.tryEmit("Transferred $fileName ($formattedSize) to TV successfully!")
-            } else {
-                _userMessage.tryEmit("Please connect to a TV device first")
-            }
+        val device = _connectedDevice.value
+        if (device != null && device.ipAddress.isNotBlank()) {
+            com.example.service.FileUploadService.startUpload(
+                context = context,
+                fileName = fileName,
+                fileSize = fileSize,
+                category = category,
+                device = device
+            )
+            _userMessage.tryEmit("Started transferring $fileName to TV...")
+        } else {
+            _userMessage.tryEmit("Please connect to a TV device first")
         }
     }
 
     fun triggerSubnetScan() {
         discoveryService.startDiscoveryScan(viewModelScope)
+    }
+
+    val nsdService: TvNsdDiscoveryService get() = discoveryService.nsdDiscovery
+
+    fun startNsdScan() {
+        discoveryService.nsdDiscovery.startDiscovery(viewModelScope)
+    }
+
+    fun stopNsdScan() {
+        discoveryService.nsdDiscovery.stopDiscovery()
+    }
+
+    fun setNsdFilter(filter: NsdServiceFilter) {
+        discoveryService.nsdDiscovery.setFilter(filter)
+        if (discoveryService.nsdDiscovery.isScanning.value) {
+            discoveryService.nsdDiscovery.stopDiscovery()
+            discoveryService.nsdDiscovery.startDiscovery(viewModelScope)
+        }
+    }
+
+    fun simulateNsdDevice(filter: NsdServiceFilter = NsdServiceFilter.ALL) {
+        discoveryService.nsdDiscovery.simulateDiscoveredTv(filter)
+        _userMessage.tryEmit("Simulated local Android TV discovered via NSD")
+    }
+
+    fun clearNsdLogs() {
+        discoveryService.nsdDiscovery.clearLogs()
     }
 
     fun addManualTvDevice(ip: String, port: Int, name: String) {
